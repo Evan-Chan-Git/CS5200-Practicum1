@@ -1,0 +1,256 @@
+---
+title: "[20 hrs] BUILD: Practicum I / Design & Implement a Relational Database"
+author: "Evan Chan"
+date: "2022-10-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(RMySQL)
+
+db_user <- "admin"
+db_password <- "cs5200ev"
+db_name <- "Practicum1DB"
+db_host <- "cs5200-p1-dbs.coqkhijceys5.us-east-1.rds.amazonaws.com"
+db_port <- 3306
+
+mydb <- dbConnect(MySQL(), user = db_user, password = db_password, dbname = db_name, host = db_host, port = db_port)
+```
+
+#Omit columns from csv not referenced in tables
+```{r}
+temp <- read.csv("BirdStrikesData-V2.csv")
+temp2 <- subset(temp, select = -c(model, wildlife_struck, impact, damage, remains_collected_flag, Remarks, wildlife_size, species, heavy_flag))
+```
+
+#Harmonize flight phases to be: takeoff(take-off run, taxi), landing(landing roll, approach, parked), inflight(climb, descent), unknown("")
+```{r}
+temp2$flight_phase[temp2$flight_phase == "Take-off run"] <- "takeoff"
+temp2$flight_phase[temp2$flight_phase == "Taxi"] <- "takeoff"
+temp2$flight_phase[temp2$flight_phase == "Landing Roll"] <- "landing"
+temp2$flight_phase[temp2$flight_phase == "Approach"] <- "landing"
+temp2$flight_phase[temp2$flight_phase == "Parked"] <- "landing"
+temp2$flight_phase[temp2$flight_phase == "Climb"] <- "inflight"
+temp2$flight_phase[temp2$flight_phase == "Descent"] <- "inflight"
+temp2$flight_phase[temp2$flight_phase == ""] <- "unknown"
+```
+
+#Remove military flights from df
+```{r}
+temp3 <- subset(temp2, airline != "MILITARY")
+```
+
+#Link to sentinel airport or airline when there is no aiport or airline
+```{r}
+temp3$airport[temp3$airport == ""] <- "UNKNOWN"
+temp3$airline[temp3$airline == ""] <- "UNKNOWN"
+```
+
+#Make warning a boolean flag and use TRUE if the pilot was warned, false otherwise
+```{r}
+temp3$pilot_warned_flag[temp3$pilot_warned_flag == "N"] <- "FALSE"
+temp3$pilot_warned_flag[temp3$pilot_warned_flag == "Y"] <- "TRUE"
+```
+
+#Create airports df for MySQL db
+```{r}
+aid <- NA
+airportName <- temp3$airport
+airportCode <- NA
+state <- temp3$origin
+airports_df <- data.frame(aid, airportName, airportCode, state)
+```
+#Create synthetic key values for airports table
+```{r}
+aid <- row.names(airports_df)
+airports_df <- data.frame(aid, airportName, airportCode, state)
+```
+
+#Create conditions df for MySQL db
+```{r}
+cid <- NA
+condition <- temp3$sky_conditions 
+explanation <- NA
+conditions_df <- data.frame(cid, condition, explanation)
+```
+#Create synthetic key values for conditions table
+```{r}
+cid <- row.names(conditions_df)
+conditions_df <- data.frame(cid, condition, explanation)
+```
+
+#Create incidents df for MySQL db
+```{r}
+rid <- temp3$rid
+date <- temp3$flight_date
+origin <- airports_df$aid
+airline <- temp3$airline
+aircraft <- temp3$aircraft
+flightPhase <- temp3$flight_phase
+altitude <- temp3$altitude_ft
+conditions <- conditions_df$cid
+warning <- temp3$pilot_warned_flag
+incidents_df <- data.frame(rid, date, origin, airline, aircraft, flightPhase, altitude, conditions, warning)
+```
+
+#Create tables in SQL from csv dataframes
+```{r}
+dbWriteTable(mydb, "airports", airports_df, row.names = FALSE, append = TRUE)
+dbWriteTable(mydb, "conditions", conditions_df, row.names = FALSE, append = TRUE)
+dbWriteTable(mydb, "incidents", incidents_df, row.names = FALSE, append = TRUE)
+```
+
+#Edit airports table to database schema guidelines
+```{sql connection=mydb}
+ALTER TABLE airports
+  MODIFY COLUMN airportName Varchar(255),
+  MODIFY COLUMN airportCode Varchar(255),
+  MODIFY COLUMN state Varchar(255);
+```
+
+```{sql connection=mydb}
+ALTER TABLE airports 
+  MODIFY COLUMN aid INT UNSIGNED,
+  ADD PRIMARY KEY (aid);
+```
+
+#Edit conditions table to database schema guidelines
+```{sql connection=mydb}
+ALTER TABLE conditions
+  MODIFY COLUMN `condition` Varchar(255),
+  MODIFY COLUMN explanation Varchar(255);
+```
+
+```{sql connection=mydb}
+ALTER TABLE conditions
+  MODIFY COLUMN cid INT UNSIGNED,
+  ADD PRIMARY KEY (cid);
+```
+
+#Edit incidents table to database schema guidelines
+```{sql connection=mydb}
+ALTER TABLE incidents
+  MODIFY COLUMN airline Varchar(255),
+  MODIFY COLUMN aircraft Varchar(255),
+  MODIFY COLUMN flightPhase Varchar(255),
+  MODIFY COLUMN altitude Varchar(255),
+  MODIFY COLUMN warning Enum('TRUE', 'FALSE');
+```
+
+```{sql connection=mydb}
+UPDATE incidents
+SET date = STR_TO_DATE(date, '%m/%d/%Y');
+```
+
+```{sql connection=mydb}
+ALTER TABLE incidents
+  MODIFY COLUMN `date` Date;
+```
+
+```{sql connection=mydb}
+ALTER TABLE incidents
+  MODIFY COLUMN rid INT,
+  MODIFY COLUMN origin INT UNSIGNED,
+  MODIFY COLUMN conditions INT UNSIGNED,
+  ADD PRIMARY KEY (rid),
+  ADD FOREIGN KEY (origin) REFERENCES airports(aid),
+  ADD FOREIGN KEY (conditions) REFERENCES conditions(cid);
+```
+
+#Show that the loading of the data worked by displaying parts of each table
+```{sql connection=mydb}
+SELECT * FROM airports LIMIT 10;
+```
+
+```{sql connection=mydb}
+SELECT * FROM conditions LIMIT 10;
+```
+
+```{sql connection=mydb}
+SELECT * FROM incidents LIMIT 10;
+```
+
+#Create a SQL query against your database to find the top-10 airlines with the most number of incidents. It must be a single query. 
+```{sql connection=mydb}
+SELECT airline, COUNT(*) AS num_incidents
+FROM incidents
+GROUP BY airline
+ORDER BY num_incidents DESC
+LIMIT 10;
+```
+
+#Create a SQL query against your database to find the flight phase that had an above average number bird strike incidents (during any flight phase). It must be a single query. 
+```{sql connection=mydb}
+SELECT flightPhase, COUNT(*) AS num_incidents
+FROM incidents
+GROUP BY flightPhase
+ORDER BY num_incidents DESC
+LIMIT 1;
+```
+
+#Create a SQL query against your database to find the maximum number of bird strike incidents by month (across all years). Include all airlines and all flights. It must be a single query. This query can help answer the question which month, historically, is the most dangerous for bird strikes.
+```{sql connection=mydb}
+SELECT DATE_FORMAT(`date`, '%m') AS month, COUNT(*) AS num_incidents
+FROM incidents
+GROUP BY month
+ORDER BY num_incidents DESC;
+```
+
+#Build a column chart that visualizes the number of bird strikes incidents per year from 2005 to 2011. Adorn the graph with appropriate axis labels, titles, legend, data labels, etc.
+```{r}
+library(ggplot2)
+```
+
+```{r}
+query = paste0("SELECT DATE_FORMAT(`date`, '%Y') AS year, COUNT(*) AS num_incidents FROM incidents GROUP BY year ORDER BY year DESC LIMIT 7;")
+chart_df = dbGetQuery(mydb, query)
+```
+
+```{r}
+bird_plot <- ggplot(chart_df, aes(x = year, y = num_incidents, fill = year)) + 
+  geom_col()
+print(bird_plot + ggtitle("Bird Strike Incidents 2005-2011"))
+```
+
+#Create a stored procedure in MySQL that adds a new incident to the database. You may decide what you need to pass to the stored procedure to add a bird strike incident and you must account for there being potentially a new airport. After insertion, show (in R) that your procedure worked. 
+
+```{sql connection=mydb}
+CREATE PROCEDURE `New_Incident`(
+IN datevar DATE,
+IN airlinevar Varchar(255),
+IN aircraftvar Varchar(255),
+IN flightPhasevar Varchar(255),
+IN altitudevar Varchar(255),
+IN warningvar Enum('TRUE', 'FALSE')
+)
+
+BEGIN
+
+INSERT INTO incidents(
+`date`,
+airline,
+aircraft,
+flightPhase,
+altitude,
+warning)
+
+VALUES(
+datevar,
+airlinevar,
+aircraftvar,
+flightPhasevar,
+altitudevar,
+warningvar);
+
+END
+```
+
+
+
+```{r}
+dbDisconnect(mydb)
+```
